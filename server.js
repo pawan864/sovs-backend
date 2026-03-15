@@ -22,6 +22,7 @@ app.use(cors({ origin: true, credentials: true }));
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
+  validate: { xForwardedForHeader: false },
   message: { success: false, message: 'Too many requests — please try again later' },
 });
 app.use('/api/', limiter);
@@ -30,6 +31,7 @@ app.use('/api/', limiter);
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+  validate: { xForwardedForHeader: false },
   message: { success: false, message: 'Too many login attempts — please try again later' },
 });
 app.use('/api/auth/', authLimiter);
