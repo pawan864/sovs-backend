@@ -27,7 +27,6 @@ const audit = async (action, user, details, type = 'info', req = null) => {
 };
 
 // ── find voter by aadhaar OR eci ─────────────────────────────────
-// ✅ Fields are now always visible (select:false removed from model)
 const findVoterByNumber = async (method, number) => {
   if (method === 'aadhaar') {
     return await User.findOne({ aadhaarNumber: number, role: 'voter' });
@@ -58,7 +57,6 @@ const generateEmail = async (method, number) => {
 };
 
 // ── build user response ──────────────────────────────────────────
-// ✅ toJSON now keeps aadhaar/eci — no manual patching needed
 const buildUserResponse = (voter) => {
   return voter.toJSON();
 };
@@ -108,12 +106,9 @@ router.post('/voter/send-otp', async (req, res) => {
     const otp   = process.env.OTP_SECRET || '123456';
 
     if (voter) {
-      // ── EXISTING VOTER ──────────────────────────────────────────
-      // Store OTP for verification
       voter.otp = { code: otp, expiresAt: new Date(Date.now() + 10 * 60 * 1000) };
       await voter.save();
       console.log(`[OTP] Existing voter ${voter.voterId}: ${otp}`);
-
       return res.json({
         success:   true,
         message:   'OTP sent successfully',
@@ -122,8 +117,6 @@ router.post('/voter/send-otp', async (req, res) => {
         isNew:     false,
       });
     } else {
-      // ── NEW VOTER ───────────────────────────────────────────────
-      // Not in DB — will register on OTP verify
       console.log(`[OTP] New voter ${method}: ${number} — will register on verify`);
       return res.json({
         success:   true,
@@ -140,12 +133,56 @@ router.post('/voter/send-otp', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
+// POST /api/auth/voter/check
+// Step 1.5: check if voter exists and whether they have a password
+// Returns: { isNew, hasPassword, voterId, voterName }
+// ─────────────────────────────────────────────────────────────────
+router.post('/voter/check', async (req, res) => {
+  try {
+    const { method, number } = req.body;
+    if (!method || !number)
+      return res.status(400).json({ success: false, message: 'Method and number required' });
+
+    const voter = await findVoterByNumber(method, number);
+
+    if (!voter) {
+      // New voter — no account yet
+      return res.json({ success: true, isNew: true, hasPassword: false });
+    }
+
+    if (voter.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        blocked: true,
+        message: `Your account has been blocked.\nReason: ${voter.blockedReason || 'Violation of terms.'}\nContact support to appeal.`,
+      });
+    }
+
+    const hasPassword = !!(voter.password && voter.password.length > 0);
+    return res.json({
+      success:     true,
+      isNew:       false,
+      hasPassword,
+      voterId:     voter.voterId,
+      voterName:   voter.name,
+    });
+  } catch (err) {
+    console.error('Voter check error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────
 // POST /api/auth/voter/verify-otp
-// Step 2: verify OTP → if new voter register them → login
+// Step 2: verify OTP
+//   - Existing voter with password → return needPassword: true
+//   - Existing voter no password   → login directly
+//   - New voter                    → register, return isNew: true
+// Optional body field: password (used when re-calling after password entry)
 // ─────────────────────────────────────────────────────────────────
 router.post('/voter/verify-otp', async (req, res) => {
   try {
-    const { voterId, otp, method, number } = req.body;
+    const { voterId, otp, method, number, password } = req.body;
 
     if (!otp)
       return res.status(400).json({ success: false, message: 'OTP is required' });
@@ -154,21 +191,17 @@ router.post('/voter/verify-otp', async (req, res) => {
 
     const demoOtp = process.env.OTP_SECRET || '123456';
 
-    // ── STEP 1: Find voter ────────────────────────────────────────
+    // ── Find voter ────────────────────────────────────────────────
     let voter = null;
-
-    // Try by voterId first
     if (voterId) {
       voter = await User.findOne({ voterId, role: 'voter' });
     }
-    // Fallback: find by aadhaar/eci number
     if (!voter) {
       voter = await findVoterByNumber(method, number);
     }
 
-    // ── STEP 2: Existing voter → check blocked, then validate OTP ─
+    // ── Existing voter ────────────────────────────────────────────
     if (voter) {
-      // ✅ Check if voter is blocked
       if (voter.isBlocked) {
         return res.status(403).json({
           success: false,
@@ -184,14 +217,40 @@ router.post('/voter/verify-otp', async (req, res) => {
       if (!otpValid)
         return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
 
-      // Clear OTP
+      // ── Check if voter has a password set ────────────────────────
+      const hasPassword = !!(voter.password && voter.password.length > 0);
+
+      if (hasPassword && !password) {
+        // OTP valid but password required — tell frontend to show password field
+        return res.json({
+          success:      false,
+          needPassword: true,
+          isNew:        false,
+          hasPassword:  true,
+          voterId:      voter.voterId,
+          voterName:    voter.name,
+          message:      'Password required',
+        });
+      }
+
+      if (hasPassword && password) {
+        // Verify the provided password
+        const pwMatch = await voter.comparePassword(password);
+        if (!pwMatch) {
+          return res.status(401).json({
+            success: false,
+            message: 'Incorrect password. Please try again.',
+          });
+        }
+      }
+
+      // ── All checks passed — log in ────────────────────────────────
       voter.otp = { code: null, expiresAt: null };
       await voter.save();
 
       const token = signToken(voter._id);
       await audit('VOTER_LOGIN', voter, `${voter.name} logged in`, 'success', req);
 
-      // ✅ Return user with aadhaar/eci visible
       return res.json({
         success: true,
         token,
@@ -200,15 +259,13 @@ router.post('/voter/verify-otp', async (req, res) => {
       });
     }
 
-    // ── STEP 3: New voter → validate OTP first ───────────────────
+    // ── New voter → validate OTP ──────────────────────────────────
     if (otp !== demoOtp)
       return res.status(401).json({ success: false, message: 'Invalid OTP' });
 
-    // ── STEP 4: Register new voter ───────────────────────────────
-    // Double-check uniqueness one more time before inserting
+    // Double-check uniqueness
     const alreadyExists = await findVoterByNumber(method, number);
     if (alreadyExists) {
-      // Race condition — just log them in
       const token = signToken(alreadyExists._id);
       return res.json({
         success: true,
@@ -218,6 +275,7 @@ router.post('/voter/verify-otp', async (req, res) => {
       });
     }
 
+    // ── Register new voter ────────────────────────────────────────
     const newVoterId = await generateVoterId();
     const newEmail   = await generateEmail(method, number);
 
@@ -225,20 +283,18 @@ router.post('/voter/verify-otp', async (req, res) => {
       voterId:       newVoterId,
       name:          `Voter ${newVoterId}`,
       email:         newEmail,
-      password:      '',
+      password:      '',           // password set separately via /set-password
       role:          'voter',
       aadhaarNumber: method === 'aadhaar' ? number : null,
       eciCardNumber: method === 'eci'     ? number : null,
     });
 
     console.log(`[REGISTERED] ✅ ${newVoter.voterId} | ${method}: ${number}`);
-    await audit('VOTER_REGISTERED', newVoter,
-      `New voter registered via ${method}: ${number}`, 'success', req);
+    await audit('VOTER_REGISTERED', newVoter, `New voter registered via ${method}: ${number}`, 'success', req);
 
     const token = signToken(newVoter._id, 'voter');
     await audit('VOTER_LOGIN', newVoter, `${newVoter.name} first login`, 'success', req);
 
-    // ✅ Return user with aadhaar/eci visible
     return res.json({
       success: true,
       token,
@@ -248,7 +304,6 @@ router.post('/voter/verify-otp', async (req, res) => {
 
   } catch (err) {
     console.error('Verify OTP error:', err);
-    // Duplicate key error
     if (err.code === 11000) {
       return res.status(400).json({
         success: false,
@@ -260,11 +315,37 @@ router.post('/voter/verify-otp', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
+// POST /api/auth/voter/set-password
+// New voter — set password for the first time (called after account creation)
+// ─────────────────────────────────────────────────────────────────
+router.post('/voter/set-password', protect, async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password || password.length < 6)
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (user.role !== 'voter')
+      return res.status(403).json({ success: false, message: 'Only voters can use this endpoint' });
+
+    user.password = password; // pre-save hook hashes it
+    await user.save();
+
+    await audit('PASSWORD_SET', user, `${user.name} set their voter password`, 'success', req);
+
+    res.json({ success: true, message: 'Password set successfully' });
+  } catch (err) {
+    console.error('Set password error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────
 // GET /api/auth/me
 // ─────────────────────────────────────────────────────────────────
 router.get('/me', protect, async (req, res) => {
   try {
-    // ✅ Fetch fresh user from DB to get latest voteStatus
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     res.json({ success: true, user: user.toJSON() });
