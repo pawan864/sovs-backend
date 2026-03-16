@@ -8,7 +8,7 @@ const { protect } = require('../middleware/auth');
 // ── sign JWT ──────────────────────────────────────────────────────
 const signToken = (userId, role = 'voter') =>
   jwt.sign({ id: userId, role }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '30m',
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   });
 
 // ── audit ─────────────────────────────────────────────────────────
