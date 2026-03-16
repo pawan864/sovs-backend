@@ -53,6 +53,8 @@ app.use('/api/users',      require('./routes/users'));
 app.use('/api/incidents',  require('./routes/incidents'));
 app.use('/api/dashboard',  require('./routes/dashboard'));
 app.use('/api/locations',  require('./routes/locations'));
+app.use('/api/feedback',   require('./routes/feedback'));
+app.use('/api/notices',    require('./routes/notices'));
 
 // ── Health Check ──────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

@@ -235,4 +235,46 @@ router.get('/recent', protect, authorize('admin', 'dm', 'sdm', 'cdo'), async (re
   }
 });
 
+// ─────────────────────────────────────────────────────────────────
+// DELETE /api/votes/admin/reset/:electionId/:userId
+// Admin only — reset a voter's vote (remove from votes collection)
+// Also decrements election turnout and results count
+// ─────────────────────────────────────────────────────────────────
+router.delete('/admin/reset/:electionId/:userId', protect, authorize('admin'), async (req, res) => {
+  try {
+    const { electionId, userId } = req.params;
+
+    // Find the vote
+    const vote = await Vote.findOne({ electionId, userId });
+    if (!vote) {
+      return res.status(404).json({ success: false, message: 'No vote found for this voter in this election' });
+    }
+
+    // Remove from election results and decrement turnout
+    const election = await Election.findById(electionId);
+    if (election) {
+      const currentCount = election.results.get(vote.candidateId) || 0;
+      if (currentCount > 0) election.results.set(vote.candidateId, currentCount - 1);
+      if (election.turnout > 0) election.turnout -= 1;
+      await election.save();
+    }
+
+    // Delete the vote record
+    await Vote.findByIdAndDelete(vote._id);
+
+    await AuditLog.create({
+      action:   'VOTE_RESET',
+      userId:   req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      details:  `Vote reset for voter ${userId} in election "${election?.title || electionId}"`,
+      type:     'warning',
+    });
+
+    res.json({ success: true, message: 'Vote reset successfully. Voter can now vote again.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 module.exports = router;
