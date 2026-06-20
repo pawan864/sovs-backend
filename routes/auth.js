@@ -93,6 +93,42 @@ router.post('/login', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────
+// POST /api/auth/reset-password
+// Forgot-password flow for admin / dm / sdm / cdo staff accounts
+// ─────────────────────────────────────────────────────────────────
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { email, otp, password } = req.body;
+    if (!email || !otp || !password)
+      return res.status(400).json({ success: false, message: 'Email, OTP and new password are required' });
+
+    if (password.length < 6)
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+
+    const demoOtp = process.env.OTP_SECRET || '123456';
+    if (otp !== demoOtp)
+      return res.status(401).json({ success: false, message: 'Invalid OTP' });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user)
+      return res.status(404).json({ success: false, message: 'No account found with this email' });
+
+    if (user.role === 'voter')
+      return res.status(400).json({ success: false, message: 'Voters must reset password via the OTP login flow' });
+
+    user.password = password; // pre-save hook hashes it
+    await user.save();
+
+    await audit('PASSWORD_RESET', user, `${user.role.toUpperCase()} reset their password`, 'success', req);
+
+    res.json({ success: true, message: 'Password reset successfully' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────
 // POST /api/auth/voter/send-otp
 // Step 1: voter enters aadhaar/eci → check DB → send OTP
 // ─────────────────────────────────────────────────────────────────
